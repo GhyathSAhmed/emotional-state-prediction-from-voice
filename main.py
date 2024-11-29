@@ -1,93 +1,115 @@
-import os
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
-import librosa
+from sklearn.preprocessing import OneHotEncoder
 import numpy as np
-
-
-# Directory containing MP3 files
-data_dir = 'AudioMP3'
-
-
-
-def Creat_dataFrame(data_dir):
-
-    # List to store parsed information (actor_id, sentence_id, emotion_id, strength_id, file_path)
-    data_list = []
-
-    # Function to parse the filename and extract metadata
-    def parse_filename(file_name):
-        parts = file_name.split('_')
-        actor_id = parts[0]  # Actor ID
-        sentence_id = parts[1]  # Sentence ID
-        emotion_id = parts[2]  # Emotion ID
-        strength_id = parts[3].split('.')[0]  # Remove .mp3 from strength ID
-        return actor_id, sentence_id, emotion_id, strength_id
-
-    # Iterate through all the MP3 files in the directory
-    for file_name in os.listdir(data_dir):
-        if file_name.endswith('.mp3'):  # Only process MP3 files
-            # Parse the filename
-            actor_id, sentence_id, emotion_id, strength_id = parse_filename(file_name)
-            
-            # Full file path for audio loading later
-            file_path = os.path.join(data_dir, file_name)
-            
-            # Append data to list
-            data_list.append([actor_id, sentence_id, emotion_id, strength_id, file_path])
-
-    # Convert the list to a Pandas DataFrame for better organization
-    df = pd.DataFrame(data_list, columns=['actor_id', 'sentence_id', 'emotion_id', 'strength_id', 'file_path'])
-
-    # # Save the DataFrame to a CSV file
-    # df.to_csv('parsed_audio_data.csv', index=False)
-
-    # Show the first few rows of the DataFrame
-    print('df is done')
-
-    return df
-
-    ########
-
-def Audio_MFCC_convertion(data_frame):
-    # Function to extract MFCC features from an MP3 file
-    def mp3_to_mfcc(file_path):
-        y, sr = librosa.load(file_path, sr=16000)  # Load audio and resample to 16kHz
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)  # Extract 13 MFCCs
-        mfccs_mean = np.mean(mfccs.T, axis=0)  # Take the mean across time for each MFCC coefficient
-        return mfccs_mean
-
-    # Initialize an empty list to store MFCC features
-    mfccs_list = []
-
-    # Loop through all file paths and extract MFCC features
-    for file_path in data_frame['file_path']:
-        mfccs = mp3_to_mfcc(file_path)
-        mfccs_list.append(mfccs)
-
-    # Convert the list of MFCCs to a NumPy array for model input
-    X = np.array(mfccs_list)
-
-    return X
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import tensorflow as tf
 
 
 
-df = Creat_dataFrame(data_dir)
+data = pd.read_csv('emotions_5.csv')
+print(data.head())
 
 
-# Assuming df contains 'emotion_id' and 'file_path'
-label_encoder = LabelEncoder()
-df['emotion_id_encoded'] = label_encoder.fit_transform(df['emotion_id'])
+#taking all rows and all cols without last col for X which include features
+#taking last col for Y, which include the emotions
+X = data.iloc[: ,:-1].values
+Y = data['Emotions'].values
 
-# Show the first few rows to verify
-print(df[['emotion_id', 'emotion_id_encoded']].head())
+#One-Hot Encoding the labels
+
+onehot_encoder = OneHotEncoder()
+Y = onehot_encoder.fit_transform(np.array(Y).reshape(-1,1)).toarray()
+
+print(f"Features shape: {X.shape}, target shape : {Y.shape}")
 
 
-# The target variable will be the encoded emotion labels
-y = df['emotion_id_encoded'].values
+# train test split
+X_train , X_test , y_train , y_test = train_test_split(X , Y , test_size= 0.2 , random_state=123)
+print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
 
-X = Audio_MFCC_convertion(df)
 
-print(f"Features shape (MFCCs): {X.shape}, target shape : {y.shape}")
 
-print('done')
+# stander scaling for the features
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+print(X_train.shape, y_train.shape, X_test.shape, y_test.shape)
+
+# early stopping to prevent overfitting
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss',
+                                                   patience=10,
+                                                     restore_best_weights=True)
+
+lr_reduction = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_acc',patience=3,verbose=1,factor=0.5,min_lr=0.00001)
+
+# Build a simple feedforward neural network model
+model = tf.keras.models.Sequential([
+    tf.keras.layers.Dense(512, input_dim=X_train.shape[1] , activation='relu', kernel_initializer="uniform"),
+    tf.keras.layers.Dropout(0.5),  # Dropout for regularization
+    tf.keras.layers.Dense(64, activation='relu', kernel_initializer="uniform"),
+    tf.keras.layers.Dropout(0.5),  # Dropout for regularization 
+    tf.keras.layers.Dense(32, activation='relu', kernel_initializer="uniform"),
+    tf.keras.layers.Dropout(0.5),  # Dropout for regularization 
+    tf.keras.layers.Dense(y_train.shape[1] , activation='softmax')  # Output layer for classification
+])
+
+
+
+# Compile the model with an appropriate loss function and optimizer
+model.compile(optimizer= 'adam' , loss='categorical_crossentropy', metrics=['accuracy'])
+
+model.summary()
+
+
+# Train the model
+history = model.fit(X_train, y_train,
+                     epochs=100, batch_size=64,
+                       validation_data=(X_test, y_test),
+                       callbacks=[early_stopping],
+                       verbose = 1
+                       )
+
+# Evaluate the model on the test data
+test_loss, test_acc = model.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_acc}")
+
+
+# saving the model
+
+import joblib as jb
+jb.dump(model,'model_2.pkl')
+
+
+import matplotlib.pyplot as plt
+
+# Plot training & validation accuracy
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Model Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend()
+plt.show()
+
+# Plot training & validation loss
+plt.plot(history.history['loss'], label='Train Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Model Loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend()
+plt.show()
+
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+y_pred = model.predict(X_test)
+y_pred_classes = np.argmax(y_pred, axis=1)
+
+cm = confusion_matrix(y_test, y_pred_classes)
+sns.heatmap(cm, annot=True, fmt='d')
+plt.show()
+
+print(classification_report(y_test, y_pred_classes))
